@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: oms-walmart-service
+    env: node
+    region: ohio
+    buildCommand: npm install
+    startCommand: node src/server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3004
+      - key: DATABASE_URL
+        sync: false
+      - key: ORDERS_SERVICE_URL
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
