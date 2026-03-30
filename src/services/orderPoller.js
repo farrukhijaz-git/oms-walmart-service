@@ -17,7 +17,7 @@ async function pollOrders() {
   const resp = await axios.get(WALMART_ORDERS_URL, {
     params: { createdStartDate: lastPolled, limit: 200 },
     headers: {
-      'Authorization': `Bearer ${token}`,
+      'WM_SEC.ACCESS_TOKEN': token,
       'WM_QOS.CORRELATION_ID': `oms-poll-${Date.now()}`,
       'WM_SVC.NAME': 'OMS',
       'Accept': 'application/json',
