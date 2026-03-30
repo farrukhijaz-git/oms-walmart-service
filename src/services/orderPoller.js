@@ -70,7 +70,7 @@ async function pollOrders() {
         items,
       }, {
         headers: {
-          'X-User-Id': 'system',
+          'X-User-Id': '00000000-0000-0000-0000-000000000000',
           'X-User-Role': 'admin',
         },
       });
