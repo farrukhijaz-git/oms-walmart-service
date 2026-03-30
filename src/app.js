@@ -1,6 +1,5 @@
 const express = require('express');
 const helmet = require('helmet');
-const cors = require('cors');
 const morgan = require('morgan');
 
 const walmartRoutes = require('./routes/walmart');
@@ -8,8 +7,8 @@ const walmartRoutes = require('./routes/walmart');
 const app = express();
 
 // Security and logging middleware
+// No CORS here — this service is behind the gateway which handles CORS
 app.use(helmet());
-app.use(cors());
 app.use(morgan('combined'));
 app.use(express.json());
 
