@@ -29,14 +29,25 @@ async function startScheduler() {
 
   if (currentTask) currentTask.stop();
 
+  // Run once immediately on startup so we don't wait a full interval after a
+  // Render spin-up or service restart before catching up on missed orders.
+  setImmediate(async () => {
+    console.log('Running startup poll...');
+    try {
+      const result = await pollOrders();
+      console.log(`Startup poll: ${result.pulled} pulled, ${result.updated} updated, ${result.skipped} skipped`);
+    } catch (err) {
+      console.error('Startup poll error:', err.message);
+    }
+  });
+
   currentTask = cron.schedule(cronExpr, async () => {
     console.log('Polling Walmart orders...');
     try {
       const result = await pollOrders();
-      console.log(`Poll result: ${result.pulled} pulled, ${result.skipped} skipped`);
+      console.log(`Poll result: ${result.pulled} pulled, ${result.updated} updated, ${result.skipped} skipped`);
     } catch (err) {
       console.error('Poll error:', err.message);
-      // Log failure
       try {
         await pool.query(
           `INSERT INTO walmart.sync_log (sync_type, status, orders_pulled, orders_pushed, error_message)
