@@ -1,7 +1,7 @@
 const express = require('express');
 const pool = require('../db');
 const { encrypt } = require('../utils/crypto');
-const { pollOrders } = require('../services/orderPoller');
+const { pollOrders, backfillOrders } = require('../services/orderPoller');
 const { getCredentials } = require('../services/walmartAuth');
 const { restartScheduler } = require('../services/scheduler');
 const requireUser = require('../middleware/requireUser');
@@ -40,6 +40,26 @@ router.post('/sync/pull', requireUser, requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('Manual poll error:', err);
     res.status(500).json({ error: { code: 'POLL_ERROR', message: err.message } });
+  }
+});
+
+// POST /walmart/sync/backfill - import all orders from a given date (Admin only)
+// Body: { from_date: "2026-03-10" }
+router.post('/sync/backfill', requireUser, requireAdmin, async (req, res) => {
+  const { from_date } = req.body;
+  if (!from_date) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'from_date is required (YYYY-MM-DD)' } });
+  }
+  const parsed = new Date(from_date);
+  if (isNaN(parsed.getTime())) {
+    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid from_date' } });
+  }
+  try {
+    const result = await backfillOrders(parsed.toISOString());
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('Backfill error:', err);
+    res.status(500).json({ error: { code: 'BACKFILL_ERROR', message: err.message } });
   }
 });
 

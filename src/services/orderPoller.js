@@ -51,139 +51,122 @@ function isMoreAdvanced(currentStatus, targetStatus) {
   return ORDER.indexOf(targetStatus) > ORDER.indexOf(currentStatus);
 }
 
+/**
+ * Core fetch+import loop. Handles Walmart API pagination via nextCursor.
+ * fromDate: ISO string for createdStartDate. Defaults to 24h ago.
+ */
+async function fetchAndImportOrders(token, fromDate) {
+  let cursor = null;
+  let pulled = 0, updated = 0, skipped = 0;
+  const errors = [];
+
+  do {
+    const params = { createdStartDate: fromDate, limit: 200 };
+    if (cursor) params.nextCursor = cursor;
+
+    const resp = await axios.get(WALMART_ORDERS_URL, {
+      params,
+      headers: {
+        'WM_SEC.ACCESS_TOKEN': token,
+        'WM_QOS.CORRELATION_ID': `oms-poll-${Date.now()}`,
+        'WM_SVC.NAME': 'OMS',
+        'Accept': 'application/json',
+      },
+    });
+
+    const walmartOrders = resp.data?.list?.elements?.order || [];
+    cursor = resp.data?.list?.meta?.nextCursor || null;
+
+    for (const wOrder of walmartOrders) {
+      try {
+        const externalId = wOrder.purchaseOrderId;
+        const omsStatus = mapWalmartStatus(wOrder.orderStatus);
+
+        if (omsStatus === null) { skipped++; continue; }
+
+        const shippingAddr = wOrder.shippingInfo?.postalAddress || {};
+        const orderLines = wOrder.orderLines?.orderLine || [];
+        const trackingNumber = extractTrackingNumber(orderLines);
+
+        const existing = await pool.query(
+          'SELECT id, status, tracking_number FROM orders.orders WHERE external_id = $1',
+          [externalId]
+        );
+
+        if (existing.rows.length > 0) {
+          const { id: existingId, status: currentStatus, tracking_number: currentTracking } = existing.rows[0];
+          const canPromoteStatus = WALMART_PROMOTABLE.includes(omsStatus) && isMoreAdvanced(currentStatus, omsStatus);
+          const canAddTracking = trackingNumber && !currentTracking;
+
+          if (canPromoteStatus) {
+            const body = { status: omsStatus, note: `Auto-updated from Walmart (${wOrder.orderStatus})` };
+            if (canAddTracking) body.tracking_number = trackingNumber;
+            await axios.patch(`${ORDERS_SERVICE_URL}/orders/${existingId}/status`, body, {
+              headers: { 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'X-User-Role': 'admin' },
+            });
+            updated++;
+          } else if (canAddTracking) {
+            await axios.patch(`${ORDERS_SERVICE_URL}/orders/${existingId}`, { tracking_number: trackingNumber }, {
+              headers: { 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'X-User-Role': 'admin' },
+            });
+            updated++;
+          } else {
+            skipped++;
+          }
+          continue;
+        }
+
+        const items = orderLines.map(line => ({
+          sku: line.item?.sku || line.lineNumber,
+          name: line.item?.productName || 'Unknown Item',
+          quantity: parseInt(line.orderLineQuantity?.amount || '1'),
+          unit_price: parseFloat(line.charges?.charge?.[0]?.chargeAmount?.amount || '0'),
+        }));
+
+        const payload = {
+          external_id: externalId,
+          platform: 'walmart',
+          customer_name: shippingAddr.name || 'Unknown',
+          address_line1: shippingAddr.address1 || '',
+          address_line2: shippingAddr.address2 || null,
+          city: shippingAddr.city || '',
+          state: shippingAddr.state || '',
+          zip: shippingAddr.postalCode || '',
+          country: shippingAddr.country || 'US',
+          status: omsStatus,
+          items,
+        };
+        if (trackingNumber) payload.tracking_number = trackingNumber;
+
+        await axios.post(`${ORDERS_SERVICE_URL}/orders`, payload, {
+          headers: { 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'X-User-Role': 'admin' },
+        });
+        pulled++;
+      } catch (err) {
+        errors.push(`Order ${wOrder.purchaseOrderId}: ${err.message}`);
+      }
+    }
+  } while (cursor);
+
+  return { pulled, updated, skipped, errors };
+}
+
 async function pollOrders() {
   const creds = await getCredentials();
   const token = await getAccessToken();
 
   // Always look back 24 hours regardless of last_polled_at.
-  //
   // Walmart releases orders in a nightly batch at midnight US Eastern (04:00 UTC).
-  // The customer order date (what createdStartDate filters on) is when the order
-  // was placed — potentially 8-12 hours before the batch drops. By the time the
-  // batch appears in the API our rolling last_polled_at cursor is already past
-  // those order dates, so a short overlap doesn't help.
-  //
-  // A 24-hour window guarantees we always cover a full batch cycle.
-  // The external_id duplicate check makes this safe — existing orders are
-  // skipped, never re-created.
-  const lastPolled = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  // The customer order date (createdStartDate) is when the order was placed —
+  // potentially 8-12h before the batch drops. A 24h window guarantees coverage.
+  // external_id duplicate check makes this safe.
+  const fromDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { pulled, updated, skipped, errors } = await fetchAndImportOrders(token, fromDate);
 
-  const resp = await axios.get(WALMART_ORDERS_URL, {
-    params: { createdStartDate: lastPolled, limit: 200 },
-    headers: {
-      'WM_SEC.ACCESS_TOKEN': token,
-      'WM_QOS.CORRELATION_ID': `oms-poll-${Date.now()}`,
-      'WM_SVC.NAME': 'OMS',
-      'Accept': 'application/json',
-    },
-  });
-
-  const walmartOrders = resp.data?.list?.elements?.order || [];
-
-  let pulled = 0;
-  let updated = 0;
-  let skipped = 0;
-  const errors = [];
-
-  for (const wOrder of walmartOrders) {
-    try {
-      const externalId = wOrder.purchaseOrderId;
-      const omsStatus = mapWalmartStatus(wOrder.orderStatus);
-
-      if (omsStatus === null) {
-        skipped++;
-        continue;
-      }
-
-      const shippingAddr = wOrder.shippingInfo?.postalAddress || {};
-      const orderLines = wOrder.orderLines?.orderLine || [];
-      const trackingNumber = extractTrackingNumber(orderLines);
-
-      // --- Check if order already exists in OMS ---
-      const existing = await pool.query(
-        'SELECT id, status, tracking_number FROM orders.orders WHERE external_id = $1',
-        [externalId]
-      );
-
-      if (existing.rows.length > 0) {
-        // Order already exists — only sync if Walmart has a terminal status update
-        const { id: existingId, status: currentStatus, tracking_number: currentTracking } = existing.rows[0];
-
-        const canPromoteStatus =
-          WALMART_PROMOTABLE.includes(omsStatus) && isMoreAdvanced(currentStatus, omsStatus);
-        const canAddTracking = trackingNumber && !currentTracking;
-
-        if (canPromoteStatus) {
-          // Update status (and tracking if newly available)
-          const body = {
-            status: omsStatus,
-            note: `Auto-updated from Walmart (${wOrder.orderStatus})`,
-          };
-          if (canAddTracking) body.tracking_number = trackingNumber;
-
-          await axios.patch(
-            `${ORDERS_SERVICE_URL}/orders/${existingId}/status`,
-            body,
-            { headers: { 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'X-User-Role': 'admin' } }
-          );
-          updated++;
-        } else if (canAddTracking) {
-          // Status is already up to date, but we now have a tracking number
-          await axios.patch(
-            `${ORDERS_SERVICE_URL}/orders/${existingId}`,
-            { tracking_number: trackingNumber },
-            { headers: { 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'X-User-Role': 'admin' } }
-          );
-          updated++;
-        } else {
-          skipped++;
-        }
-        continue;
-      }
-
-      // --- New order — create it ---
-      const items = orderLines.map(line => ({
-        sku: line.item?.sku || line.lineNumber,
-        name: line.item?.productName || 'Unknown Item',
-        quantity: parseInt(line.orderLineQuantity?.amount || '1'),
-        unit_price: parseFloat(line.charges?.charge?.[0]?.chargeAmount?.amount || '0'),
-      }));
-
-      const payload = {
-        external_id: externalId,
-        platform: 'walmart',
-        customer_name: shippingAddr.name || 'Unknown',
-        address_line1: shippingAddr.address1 || '',
-        address_line2: shippingAddr.address2 || null,
-        city: shippingAddr.city || '',
-        state: shippingAddr.state || '',
-        zip: shippingAddr.postalCode || '',
-        country: shippingAddr.country || 'US',
-        status: omsStatus,
-        items,
-      };
-      if (trackingNumber) payload.tracking_number = trackingNumber;
-
-      await axios.post(`${ORDERS_SERVICE_URL}/orders`, payload, {
-        headers: {
-          'X-User-Id': '00000000-0000-0000-0000-000000000000',
-          'X-User-Role': 'admin',
-        },
-      });
-
-      pulled++;
-    } catch (err) {
-      errors.push(`Order ${wOrder.purchaseOrderId}: ${err.message}`);
-    }
-  }
-
-  // Update last_polled_at
   await pool.query(
     'UPDATE walmart.credentials SET last_polled_at = now(), updated_at = now() WHERE id = $1',
     [creds.id]
   );
-
-  // Log result
   await pool.query(
     `INSERT INTO walmart.sync_log (sync_type, status, orders_pulled, orders_pushed, error_message)
      VALUES ('pull_orders', $1, $2, 0, $3)`,
@@ -197,4 +180,25 @@ async function pollOrders() {
   return { pulled, updated, skipped, errors };
 }
 
-module.exports = { pollOrders };
+/**
+ * One-time backfill from a given date. Does not update last_polled_at so
+ * the regular 24h poll schedule is unaffected.
+ */
+async function backfillOrders(fromDate) {
+  const token = await getAccessToken();
+  const { pulled, updated, skipped, errors } = await fetchAndImportOrders(token, fromDate);
+
+  await pool.query(
+    `INSERT INTO walmart.sync_log (sync_type, status, orders_pulled, orders_pushed, error_message)
+     VALUES ('backfill', $1, $2, 0, $3)`,
+    [
+      errors.length === 0 ? 'success' : pulled + updated > 0 ? 'partial' : 'failed',
+      pulled + updated,
+      errors.length > 0 ? errors.slice(0, 3).join('; ') : null,
+    ]
+  );
+
+  return { pulled, updated, skipped, errors };
+}
+
+module.exports = { pollOrders, backfillOrders };
