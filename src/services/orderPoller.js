@@ -21,18 +21,34 @@ function mapWalmartStatus(walmartStatus) {
 }
 
 /**
+ * Derive the most advanced status across all order lines.
+ * Walmart updates status at the line level — the order-level orderStatus field
+ * often stays as "Created"/"Acknowledged" even when lines are Shipped/Delivered.
+ */
+function deriveOrderStatus(orderLines) {
+  const PRIORITY = ['Delivered', 'Shipped', 'Cancelled', 'Acknowledged', 'Created'];
+  let best = 'Created';
+  for (const line of orderLines) {
+    const statuses = line.orderLineStatuses?.orderLineStatus || [];
+    for (const ls of statuses) {
+      if (PRIORITY.indexOf(ls.status) < PRIORITY.indexOf(best)) {
+        best = ls.status;
+      }
+    }
+  }
+  return best;
+}
+
+/**
  * Extract the first tracking number found across all order lines.
- * Checks both direct trackingInfo and orderLineShipments paths.
+ * Walmart tracking lives inside orderLineStatuses.orderLineStatus[].trackingInfo.
  */
 function extractTrackingNumber(orderLines) {
   for (const line of orderLines) {
-    const direct = line.trackingInfo?.trackingNumber;
-    if (direct) return direct;
-
-    const shipments = line.orderLineShipments?.orderLineShipment || [];
-    for (const shipment of shipments) {
-      const fromShipment = shipment.trackingInfo?.trackingNumber;
-      if (fromShipment) return fromShipment;
+    const statuses = line.orderLineStatuses?.orderLineStatus || [];
+    for (const ls of statuses) {
+      const tn = ls.trackingInfo?.trackingNumber;
+      if (tn) return tn;
     }
   }
   return null;
@@ -80,12 +96,12 @@ async function fetchAndImportOrders(token, fromDate) {
     for (const wOrder of walmartOrders) {
       try {
         const externalId = wOrder.purchaseOrderId;
-        const omsStatus = mapWalmartStatus(wOrder.orderStatus);
+        const orderLines = wOrder.orderLines?.orderLine || [];
+        const omsStatus = mapWalmartStatus(deriveOrderStatus(orderLines));
 
         if (omsStatus === null) { skipped++; continue; }
 
         const shippingAddr = wOrder.shippingInfo?.postalAddress || {};
-        const orderLines = wOrder.orderLines?.orderLine || [];
         const trackingNumber = extractTrackingNumber(orderLines);
 
         const existing = await pool.query(
