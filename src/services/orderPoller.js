@@ -55,6 +55,81 @@ function extractTrackingNumber(orderLines) {
 }
 
 /**
+ * Extract ship-by date from order lines (earliest date across all lines).
+ */
+function extractShipByDate(orderLines) {
+  let earliest = null;
+  for (const line of orderLines) {
+    const statuses = line.orderLineStatuses?.orderLineStatus || [];
+    for (const ls of statuses) {
+      const shipBy = ls.shipByDate;
+      if (shipBy) {
+        const date = new Date(shipBy);
+        if (!earliest || date < earliest) {
+          earliest = date;
+        }
+      }
+    }
+  }
+  return earliest ? earliest.toISOString() : null;
+}
+
+/**
+ * Extract deliver-by date from order lines (earliest date across all lines).
+ */
+function extractDeliverByDate(orderLines) {
+  let earliest = null;
+  for (const line of orderLines) {
+    const statuses = line.orderLineStatuses?.orderLineStatus || [];
+    for (const ls of statuses) {
+      const deliverBy = ls.deliverByDate || ls.expectedDeliveryDate;
+      if (deliverBy) {
+        const date = new Date(deliverBy);
+        if (!earliest || date < earliest) {
+          earliest = date;
+        }
+      }
+    }
+  }
+  return earliest ? earliest.toISOString() : null;
+}
+
+/**
+ * Extract fulfillment/ship node from order lines (first non-null value).
+ */
+function extractShipNode(orderLines) {
+  for (const line of orderLines) {
+    const fulfillment = line.fulfillment;
+    if (fulfillment?.fulfillmentOption || fulfillment?.shipMethod) {
+      return fulfillment.fulfillmentOption || fulfillment.shipMethod;
+    }
+  }
+  return null;
+}
+
+/**
+ * Calculate order total from order amount or sum of line charges.
+ */
+function calculateOrderTotal(wOrder, orderLines) {
+  // Try orderTotal from root
+  if (wOrder.orderTotal?.amount) {
+    return parseFloat(wOrder.orderTotal.amount);
+  }
+  
+  // Fallback: sum charge amounts from all lines
+  let total = 0;
+  for (const line of orderLines) {
+    const charges = line.charges?.charge || [];
+    for (const charge of charges) {
+      if (charge.chargeAmount?.amount) {
+        total += parseFloat(charge.chargeAmount.amount);
+      }
+    }
+  }
+  return total > 0 ? total : null;
+}
+
+/**
  * OMS statuses that Walmart can legitimately push us toward.
  * We only let Walmart advance an order to shipped/delivered — we don't let
  * it touch OMS-internal statuses like label_generated, packed, etc.
@@ -103,6 +178,11 @@ async function fetchAndImportOrders(token, fromDate) {
 
         const shippingAddr = wOrder.shippingInfo?.postalAddress || {};
         const trackingNumber = extractTrackingNumber(orderLines);
+        const shipByDate = extractShipByDate(orderLines);
+        const deliverByDate = extractDeliverByDate(orderLines);
+        const shipNode = extractShipNode(orderLines);
+        const orderTotal = calculateOrderTotal(wOrder, orderLines);
+        const orderDate = wOrder.orderDate ? new Date(wOrder.orderDate).toISOString() : null;
 
         const existing = await pool.query(
           'SELECT id, status, tracking_number FROM orders.orders WHERE external_id = $1',
@@ -153,6 +233,11 @@ async function fetchAndImportOrders(token, fromDate) {
           items,
         };
         if (trackingNumber) payload.tracking_number = trackingNumber;
+        if (orderDate) payload.order_date = orderDate;
+        if (shipByDate) payload.ship_by_date = shipByDate;
+        if (deliverByDate) payload.deliver_by_date = deliverByDate;
+        if (shipNode) payload.ship_node = shipNode;
+        if (orderTotal) payload.order_total = orderTotal;
 
         await axios.post(`${ORDERS_SERVICE_URL}/orders`, payload, {
           headers: { 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'X-User-Role': 'admin' },
