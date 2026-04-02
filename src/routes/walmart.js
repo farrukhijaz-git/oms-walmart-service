@@ -45,6 +45,7 @@ router.post('/sync/pull', requireUser, requireAdmin, async (req, res) => {
 
 // POST /walmart/sync/backfill - import all orders from a given date (Admin only)
 // Body: { from_date: "2026-03-10" }
+// Returns immediately; runs import in background and logs to sync_log.
 router.post('/sync/backfill', requireUser, requireAdmin, async (req, res) => {
   const { from_date } = req.body;
   if (!from_date) {
@@ -54,13 +55,16 @@ router.post('/sync/backfill', requireUser, requireAdmin, async (req, res) => {
   if (isNaN(parsed.getTime())) {
     return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid from_date' } });
   }
-  try {
-    const result = await backfillOrders(parsed.toISOString());
-    res.json({ ok: true, ...result });
-  } catch (err) {
-    console.error('Backfill error:', err);
-    res.status(500).json({ error: { code: 'BACKFILL_ERROR', message: err.message } });
-  }
+
+  // Respond immediately — backfill may take minutes for large date ranges
+  res.json({ ok: true, message: 'Backfill started. Check sync log for results.' });
+
+  // Run in background
+  backfillOrders(parsed.toISOString()).then(result => {
+    console.log(`Backfill from ${from_date}: pulled=${result.pulled}, updated=${result.updated}, skipped=${result.skipped}, errors=${result.errors.length}`);
+  }).catch(err => {
+    console.error('Backfill error:', err.message);
+  });
 });
 
 // POST /walmart/credentials - save encrypted credentials (Admin only)
