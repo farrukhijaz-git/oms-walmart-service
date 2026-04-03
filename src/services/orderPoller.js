@@ -179,6 +179,14 @@ async function fetchAndImportOrders(token, fromDate) {
     const walmartOrders = resp.data?.list?.elements?.order || [];
     cursor = resp.data?.list?.meta?.nextCursor || null;
 
+    // DEBUG: log fulfillment structure of first order once so we can identify correct field names
+    if (walmartOrders.length > 0 && !global.__fulfillmentLogged) {
+      global.__fulfillmentLogged = true;
+      const firstLine = walmartOrders[0]?.orderLines?.orderLine?.[0];
+      console.log('[DEBUG] fulfillment:', JSON.stringify(firstLine?.fulfillment, null, 2));
+      console.log('[DEBUG] orderLineStatuses sample:', JSON.stringify(firstLine?.orderLineStatuses?.orderLineStatus?.[0], null, 2));
+    }
+
     for (const wOrder of walmartOrders) {
       try {
         const externalId = wOrder.purchaseOrderId;
