@@ -60,79 +60,42 @@ function extractTrackingNumber(orderLines) {
 }
 
 /**
- * Extract ship-by date from order lines.
- * Walmart puts estimatedShipDate on the fulfillment object (millisecond epoch).
- * Falls back to shipByDate on orderLineStatuses if not found there.
+ * Extract ship-by date from order-level shippingInfo.
+ * Walmart provides estimatedShipDate at shippingInfo level (epoch milliseconds).
  */
-function extractShipByDate(orderLines) {
-  let earliest = null;
-  for (const line of orderLines) {
-    // Primary: fulfillment.estimatedShipDate (epoch ms)
-    const estShip = line.fulfillment?.estimatedShipDate;
-    if (estShip) {
-      const date = new Date(typeof estShip === 'number' ? estShip : parseInt(estShip, 10));
-      if (!isNaN(date) && (!earliest || date < earliest)) earliest = date;
-    }
-    // Fallback: orderLineStatuses[].shipByDate (ISO string or epoch)
-    const statuses = normalizeArray(line.orderLineStatuses?.orderLineStatus);
-    for (const ls of statuses) {
-      if (ls.shipByDate) {
-        const date = new Date(ls.shipByDate);
-        if (!isNaN(date) && (!earliest || date < earliest)) earliest = date;
-      }
-    }
+function extractShipByDate(wOrder) {
+  const estShip = wOrder.shippingInfo?.estimatedShipDate;
+  if (estShip) {
+    const date = new Date(typeof estShip === 'number' ? estShip : parseInt(estShip, 10));
+    return date.toISOString();
   }
-  return earliest ? earliest.toISOString() : null;
+  return null;
 }
 
 /**
- * Extract deliver-by date from order lines.
- * Walmart puts estimatedDeliveryDate on the fulfillment object (millisecond epoch).
+ * Extract deliver-by date from order-level shippingInfo.
+ * Walmart provides estimatedDeliveryDate at shippingInfo level (epoch milliseconds).
  */
-function extractDeliverByDate(orderLines) {
-  let earliest = null;
-  for (const line of orderLines) {
-    // Primary: fulfillment.estimatedDeliveryDate (epoch ms)
-    const estDel = line.fulfillment?.estimatedDeliveryDate;
-    if (estDel) {
-      const date = new Date(typeof estDel === 'number' ? estDel : parseInt(estDel, 10));
-      if (!isNaN(date) && (!earliest || date < earliest)) earliest = date;
-    }
-    // Fallback: orderLineStatuses[].deliverByDate
-    const statuses = normalizeArray(line.orderLineStatuses?.orderLineStatus);
-    for (const ls of statuses) {
-      const deliverBy = ls.deliverByDate || ls.expectedDeliveryDate;
-      if (deliverBy) {
-        const date = new Date(deliverBy);
-        if (!isNaN(date) && (!earliest || date < earliest)) earliest = date;
-      }
-    }
+function extractDeliverByDate(wOrder) {
+  const estDel = wOrder.shippingInfo?.estimatedDeliveryDate;
+  if (estDel) {
+    const date = new Date(typeof estDel === 'number' ? estDel : parseInt(estDel, 10));
+    return date.toISOString();
   }
-  return earliest ? earliest.toISOString() : null;
+  return null;
 }
 
 /**
- * Extract ship node/fulfillment center from order.
- * Based on Walmart API docs:
- * - shippingInfo.shipMethod contains delivery method (STANDARD, VALUE, EXPRESS, etc.)
- * not a warehouse location
- * - For actual fulfillment center/warehouse, check other fields in fulfillment object
- * 
- * Returns null for now until correct field is identified in Walmart API response
+ * Extract ship node (fulfillment center) from order.
+ * Walmart provides shipNode at the top-level order object.
+ * This represents the fulfillment center or warehouse handling the order.
  */
-function extractShipNode(orderLines) {
-  // NOTE: "DELIVERY" is not a ship node - it's likely from shipMethod field
-  // Ship node should be a fulfillment center name/ID like "FC123" or "Dallas Warehouse"
-  // Temporarily returning null until we identify the correct field from Walmart API
-  return null;
-  
-  /* Original incorrect extraction:
-  for (const line of orderLines) {
-    const nodeId = line.fulfillment?.shipNode?.shipNodeId;
-    if (nodeId) return String(nodeId);
+function extractShipNode(wOrder) {
+  const shipNode = wOrder.shipNode;
+  if (shipNode && typeof shipNode === 'string' && shipNode.trim()) {
+    return String(shipNode).trim();
   }
   return null;
-  */
 }
 
 /**
@@ -206,25 +169,15 @@ async function fetchAndImportOrders(token, fromDate) {
 
         const shippingAddr = wOrder.shippingInfo?.postalAddress || {};
         const trackingNumber = extractTrackingNumber(orderLines);
-        const shipByDate = extractShipByDate(orderLines);
-        const deliverByDate = extractDeliverByDate(orderLines);
-        const shipNode = extractShipNode(orderLines);
+        const shipByDate = extractShipByDate(wOrder);
+        const deliverByDate = extractDeliverByDate(wOrder);
+        const shipNode = extractShipNode(wOrder);
         const orderTotal = calculateOrderTotal(wOrder, orderLines);
         const orderDate = wOrder.orderDate ? new Date(wOrder.orderDate).toISOString() : null;
 
-        // DEBUG: Log structure of first order to identify correct fields
-        if (pulled + updated === 0) {
-          console.log('\n=== Walmart API Order Structure Sample ===');
-          console.log('Purchase Order ID:', externalId);
-          console.log('Available top-level order fields:', Object.keys(wOrder));
-          console.log('\nshippingInfo:', JSON.stringify(wOrder.shippingInfo, null, 2));
-          if (orderLines[0]) {
-            console.log('\nFirst order line fields:', Object.keys(orderLines[0]));
-            if (orderLines[0].fulfillment) {
-              console.log('\nfulfillment object:', JSON.stringify(orderLines[0].fulfillment, null, 2));
-            }
-          }
-          console.log('===========================================\n');
+        // DEBUG: Log shipNode value from first few orders to verify extraction
+        if (pulled + updated < 3) {
+          console.log(`Order ${externalId}: shipNode from API = ${JSON.stringify(wOrder.shipNode)}, extracted = ${shipNode}`);
         }
 
         // Look up via orders service API — avoids direct cross-schema DB query
