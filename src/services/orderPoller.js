@@ -112,16 +112,27 @@ function extractDeliverByDate(orderLines) {
 }
 
 /**
- * Extract ship node name from order lines.
- * Walmart puts the node name at fulfillment.shipNode.shipNodeId
- * (despite the name, this field contains the human-readable name like "Texas Faheem").
+ * Extract ship node/fulfillment center from order.
+ * Based on Walmart API docs:
+ * - shippingInfo.shipMethod contains delivery method (STANDARD, VALUE, EXPRESS, etc.)
+ * not a warehouse location
+ * - For actual fulfillment center/warehouse, check other fields in fulfillment object
+ * 
+ * Returns null for now until correct field is identified in Walmart API response
  */
 function extractShipNode(orderLines) {
+  // NOTE: "DELIVERY" is not a ship node - it's likely from shipMethod field
+  // Ship node should be a fulfillment center name/ID like "FC123" or "Dallas Warehouse"
+  // Temporarily returning null until we identify the correct field from Walmart API
+  return null;
+  
+  /* Original incorrect extraction:
   for (const line of orderLines) {
     const nodeId = line.fulfillment?.shipNode?.shipNodeId;
     if (nodeId) return String(nodeId);
   }
   return null;
+  */
 }
 
 /**
@@ -201,15 +212,20 @@ async function fetchAndImportOrders(token, fromDate) {
         const orderTotal = calculateOrderTotal(wOrder, orderLines);
         const orderDate = wOrder.orderDate ? new Date(wOrder.orderDate).toISOString() : null;
 
-        // Debug logging for extraction
-        console.log(`[${externalId}] Extracted:`, {
-          orderDate,
-          shipByDate,
-          deliverByDate,
-          shipNode,
-          orderTotal,
-          hasOrderLines: orderLines.length,
-        });
+        // DEBUG: Log structure of first order to identify correct fields
+        if (imported + updated === 0) {
+          console.log('\n=== Walmart API Order Structure Sample ===');
+          console.log('Purchase Order ID:', externalId);
+          console.log('Available top-level order fields:', Object.keys(wOrder));
+          console.log('\nshippingInfo:', JSON.stringify(wOrder.shippingInfo, null, 2));
+          if (orderLines[0]) {
+            console.log('\nFirst order line fields:', Object.keys(orderLines[0]));
+            if (orderLines[0].fulfillment) {
+              console.log('\nfulfillment object:', JSON.stringify(orderLines[0].fulfillment, null, 2));
+            }
+          }
+          console.log('===========================================\n');
+        }
 
         // Look up via orders service API — avoids direct cross-schema DB query
         // which is fragile if the walmart service DB user lacks orders schema access.
@@ -242,8 +258,6 @@ async function fetchAndImportOrders(token, fromDate) {
           if (shipNode && shipNode !== currentShipNode) metadataPatch.ship_node = shipNode;
           if (orderTotal && !currentOrderTotal) metadataPatch.order_total = orderTotal;
           if (canAddTracking) metadataPatch.tracking_number = trackingNumber;
-
-          console.log(`[${externalId}] Metadata patch:`, metadataPatch, 'canPromoteStatus:', canPromoteStatus);
 
           if (canPromoteStatus) {
             const body = { status: omsStatus, note: `Auto-updated from Walmart (${wOrder.orderStatus})` };
