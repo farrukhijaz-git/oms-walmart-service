@@ -213,7 +213,7 @@ async function fetchAndImportOrders(token, fromDate) {
         const orderDate = wOrder.orderDate ? new Date(wOrder.orderDate).toISOString() : null;
 
         // DEBUG: Log structure of first order to identify correct fields
-        if (imported + updated === 0) {
+        if (pulled + updated === 0) {
           console.log('\n=== Walmart API Order Structure Sample ===');
           console.log('Purchase Order ID:', externalId);
           console.log('Available top-level order fields:', Object.keys(wOrder));
