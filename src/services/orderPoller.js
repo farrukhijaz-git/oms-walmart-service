@@ -55,19 +55,25 @@ function extractTrackingNumber(orderLines) {
 }
 
 /**
- * Extract ship-by date from order lines (earliest date across all lines).
+ * Extract ship-by date from order lines.
+ * Walmart puts estimatedShipDate on the fulfillment object (millisecond epoch).
+ * Falls back to shipByDate on orderLineStatuses if not found there.
  */
 function extractShipByDate(orderLines) {
   let earliest = null;
   for (const line of orderLines) {
+    // Primary: fulfillment.estimatedShipDate (epoch ms)
+    const estShip = line.fulfillment?.estimatedShipDate;
+    if (estShip) {
+      const date = new Date(typeof estShip === 'number' ? estShip : parseInt(estShip, 10));
+      if (!isNaN(date) && (!earliest || date < earliest)) earliest = date;
+    }
+    // Fallback: orderLineStatuses[].shipByDate (ISO string or epoch)
     const statuses = line.orderLineStatuses?.orderLineStatus || [];
     for (const ls of statuses) {
-      const shipBy = ls.shipByDate;
-      if (shipBy) {
-        const date = new Date(shipBy);
-        if (!earliest || date < earliest) {
-          earliest = date;
-        }
+      if (ls.shipByDate) {
+        const date = new Date(ls.shipByDate);
+        if (!isNaN(date) && (!earliest || date < earliest)) earliest = date;
       }
     }
   }
@@ -75,19 +81,25 @@ function extractShipByDate(orderLines) {
 }
 
 /**
- * Extract deliver-by date from order lines (earliest date across all lines).
+ * Extract deliver-by date from order lines.
+ * Walmart puts estimatedDeliveryDate on the fulfillment object (millisecond epoch).
  */
 function extractDeliverByDate(orderLines) {
   let earliest = null;
   for (const line of orderLines) {
+    // Primary: fulfillment.estimatedDeliveryDate (epoch ms)
+    const estDel = line.fulfillment?.estimatedDeliveryDate;
+    if (estDel) {
+      const date = new Date(typeof estDel === 'number' ? estDel : parseInt(estDel, 10));
+      if (!isNaN(date) && (!earliest || date < earliest)) earliest = date;
+    }
+    // Fallback: orderLineStatuses[].deliverByDate
     const statuses = line.orderLineStatuses?.orderLineStatus || [];
     for (const ls of statuses) {
       const deliverBy = ls.deliverByDate || ls.expectedDeliveryDate;
       if (deliverBy) {
         const date = new Date(deliverBy);
-        if (!earliest || date < earliest) {
-          earliest = date;
-        }
+        if (!isNaN(date) && (!earliest || date < earliest)) earliest = date;
       }
     }
   }
@@ -95,14 +107,13 @@ function extractDeliverByDate(orderLines) {
 }
 
 /**
- * Extract fulfillment/ship node from order lines (first non-null value).
+ * Extract ship node ID from order lines.
+ * Walmart puts the node ID at fulfillment.shipNode.id.
  */
 function extractShipNode(orderLines) {
   for (const line of orderLines) {
-    const fulfillment = line.fulfillment;
-    if (fulfillment?.fulfillmentOption || fulfillment?.shipMethod) {
-      return fulfillment.fulfillmentOption || fulfillment.shipMethod;
-    }
+    const nodeId = line.fulfillment?.shipNode?.id;
+    if (nodeId) return String(nodeId);
   }
   return null;
 }
