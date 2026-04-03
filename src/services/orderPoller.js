@@ -25,11 +25,16 @@ function mapWalmartStatus(walmartStatus) {
  * Walmart updates status at the line level — the order-level orderStatus field
  * often stays as "Created"/"Acknowledged" even when lines are Shipped/Delivered.
  */
+function normalizeArray(val) {
+  if (!val) return [];
+  return Array.isArray(val) ? val : [val];
+}
+
 function deriveOrderStatus(orderLines) {
   const PRIORITY = ['Delivered', 'Shipped', 'Cancelled', 'Acknowledged', 'Created'];
   let best = 'Created';
   for (const line of orderLines) {
-    const statuses = line.orderLineStatuses?.orderLineStatus || [];
+    const statuses = normalizeArray(line.orderLineStatuses?.orderLineStatus);
     for (const ls of statuses) {
       if (PRIORITY.indexOf(ls.status) < PRIORITY.indexOf(best)) {
         best = ls.status;
@@ -45,7 +50,7 @@ function deriveOrderStatus(orderLines) {
  */
 function extractTrackingNumber(orderLines) {
   for (const line of orderLines) {
-    const statuses = line.orderLineStatuses?.orderLineStatus || [];
+    const statuses = normalizeArray(line.orderLineStatuses?.orderLineStatus);
     for (const ls of statuses) {
       const tn = ls.trackingInfo?.trackingNumber;
       if (tn) return tn;
@@ -69,7 +74,7 @@ function extractShipByDate(orderLines) {
       if (!isNaN(date) && (!earliest || date < earliest)) earliest = date;
     }
     // Fallback: orderLineStatuses[].shipByDate (ISO string or epoch)
-    const statuses = line.orderLineStatuses?.orderLineStatus || [];
+    const statuses = normalizeArray(line.orderLineStatuses?.orderLineStatus);
     for (const ls of statuses) {
       if (ls.shipByDate) {
         const date = new Date(ls.shipByDate);
@@ -94,7 +99,7 @@ function extractDeliverByDate(orderLines) {
       if (!isNaN(date) && (!earliest || date < earliest)) earliest = date;
     }
     // Fallback: orderLineStatuses[].deliverByDate
-    const statuses = line.orderLineStatuses?.orderLineStatus || [];
+    const statuses = normalizeArray(line.orderLineStatuses?.orderLineStatus);
     for (const ls of statuses) {
       const deliverBy = ls.deliverByDate || ls.expectedDeliveryDate;
       if (deliverBy) {
@@ -131,7 +136,7 @@ function calculateOrderTotal(wOrder, orderLines) {
   // Fallback: sum charge amounts from all lines
   let total = 0;
   for (const line of orderLines) {
-    const charges = line.charges?.charge || [];
+    const charges = normalizeArray(line.charges?.charge);
     for (const charge of charges) {
       if (charge.chargeAmount?.amount) {
         total += parseFloat(charge.chargeAmount.amount);
@@ -177,13 +182,13 @@ async function fetchAndImportOrders(token, fromDate) {
       },
     });
 
-    const walmartOrders = resp.data?.list?.elements?.order || [];
+    const walmartOrders = normalizeArray(resp.data?.list?.elements?.order);
     cursor = resp.data?.list?.meta?.nextCursor || null;
 
     for (const wOrder of walmartOrders) {
       try {
         const externalId = wOrder.purchaseOrderId;
-        const orderLines = wOrder.orderLines?.orderLine || [];
+        const orderLines = normalizeArray(wOrder.orderLines?.orderLine);
         const omsStatus = mapWalmartStatus(deriveOrderStatus(orderLines));
 
         if (omsStatus === null) { skipped++; continue; }
@@ -196,18 +201,36 @@ async function fetchAndImportOrders(token, fromDate) {
         const orderTotal = calculateOrderTotal(wOrder, orderLines);
         const orderDate = wOrder.orderDate ? new Date(wOrder.orderDate).toISOString() : null;
 
-        const existing = await pool.query(
-          'SELECT id, status, tracking_number, order_date, ship_by_date, deliver_by_date, ship_node, order_total FROM orders.orders WHERE external_id = $1',
-          [externalId]
-        );
+        // Debug logging for extraction
+        console.log(`[${externalId}] Extracted:`, {
+          orderDate,
+          shipByDate,
+          deliverByDate,
+          shipNode,
+          orderTotal,
+          hasOrderLines: orderLines.length,
+        });
 
-        if (existing.rows.length > 0) {
+        // Look up via orders service API — avoids direct cross-schema DB query
+        // which is fragile if the walmart service DB user lacks orders schema access.
+        let existingOrder = null;
+        try {
+          const lookupResp = await axios.get(
+            `${ORDERS_SERVICE_URL}/orders/by-external-id/${encodeURIComponent(externalId)}`,
+            { headers: { 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'X-User-Role': 'admin' } }
+          );
+          existingOrder = lookupResp.data?.order || null;
+        } catch (lookupErr) {
+          if (lookupErr.response?.status !== 404) throw lookupErr;
+        }
+
+        if (existingOrder) {
           const {
             id: existingId, status: currentStatus, tracking_number: currentTracking,
             order_date: currentOrderDate, ship_by_date: currentShipBy,
             deliver_by_date: currentDeliverBy, ship_node: currentShipNode,
             order_total: currentOrderTotal,
-          } = existing.rows[0];
+          } = existingOrder;
           const canPromoteStatus = WALMART_PROMOTABLE.includes(omsStatus) && isMoreAdvanced(currentStatus, omsStatus);
           const canAddTracking = trackingNumber && !currentTracking;
 
@@ -219,6 +242,8 @@ async function fetchAndImportOrders(token, fromDate) {
           if (shipNode && shipNode !== currentShipNode) metadataPatch.ship_node = shipNode;
           if (orderTotal && !currentOrderTotal) metadataPatch.order_total = orderTotal;
           if (canAddTracking) metadataPatch.tracking_number = trackingNumber;
+
+          console.log(`[${externalId}] Metadata patch:`, metadataPatch, 'canPromoteStatus:', canPromoteStatus);
 
           if (canPromoteStatus) {
             const body = { status: omsStatus, note: `Auto-updated from Walmart (${wOrder.orderStatus})` };
@@ -282,6 +307,15 @@ async function fetchAndImportOrders(token, fromDate) {
   return { pulled, updated, skipped, errors };
 }
 
+function buildLogMessage(pulled, updated, skipped, errors) {
+  const parts = [];
+  if (pulled > 0)  parts.push(`${pulled} new`);
+  if (updated > 0) parts.push(`${updated} updated`);
+  if (skipped > 0) parts.push(`${skipped} skipped (already current)`);
+  if (errors.length > 0) parts.push(...errors.slice(0, 3));
+  return parts.length > 0 ? parts.join('; ') : null;
+}
+
 async function pollOrders() {
   const creds = await getCredentials();
   const token = await getAccessToken();
@@ -304,7 +338,7 @@ async function pollOrders() {
     [
       errors.length === 0 ? 'success' : pulled + updated > 0 ? 'partial' : 'failed',
       pulled + updated,
-      errors.length > 0 ? errors.slice(0, 3).join('; ') : null,
+      buildLogMessage(pulled, updated, skipped, errors),
     ]
   );
 
@@ -325,7 +359,7 @@ async function backfillOrders(fromDate) {
     [
       errors.length === 0 ? 'success' : pulled + updated > 0 ? 'partial' : 'failed',
       pulled + updated,
-      errors.length > 0 ? errors.slice(0, 3).join('; ') : null,
+      buildLogMessage(pulled, updated, skipped, errors),
     ]
   );
 
