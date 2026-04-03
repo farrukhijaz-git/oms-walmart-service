@@ -185,24 +185,42 @@ async function fetchAndImportOrders(token, fromDate) {
         const orderDate = wOrder.orderDate ? new Date(wOrder.orderDate).toISOString() : null;
 
         const existing = await pool.query(
-          'SELECT id, status, tracking_number FROM orders.orders WHERE external_id = $1',
+          'SELECT id, status, tracking_number, order_date, ship_by_date, deliver_by_date, ship_node, order_total FROM orders.orders WHERE external_id = $1',
           [externalId]
         );
 
         if (existing.rows.length > 0) {
-          const { id: existingId, status: currentStatus, tracking_number: currentTracking } = existing.rows[0];
+          const {
+            id: existingId, status: currentStatus, tracking_number: currentTracking,
+            order_date: currentOrderDate, ship_by_date: currentShipBy,
+            deliver_by_date: currentDeliverBy, ship_node: currentShipNode,
+            order_total: currentOrderTotal,
+          } = existing.rows[0];
           const canPromoteStatus = WALMART_PROMOTABLE.includes(omsStatus) && isMoreAdvanced(currentStatus, omsStatus);
           const canAddTracking = trackingNumber && !currentTracking;
 
+          // Build metadata patch for fields that are null in DB but available from Walmart
+          const metadataPatch = {};
+          if (orderDate && !currentOrderDate) metadataPatch.order_date = orderDate;
+          if (shipByDate && !currentShipBy) metadataPatch.ship_by_date = shipByDate;
+          if (deliverByDate && !currentDeliverBy) metadataPatch.deliver_by_date = deliverByDate;
+          if (shipNode && !currentShipNode) metadataPatch.ship_node = shipNode;
+          if (orderTotal && !currentOrderTotal) metadataPatch.order_total = orderTotal;
+          if (canAddTracking) metadataPatch.tracking_number = trackingNumber;
+
           if (canPromoteStatus) {
             const body = { status: omsStatus, note: `Auto-updated from Walmart (${wOrder.orderStatus})` };
-            if (canAddTracking) body.tracking_number = trackingNumber;
             await axios.patch(`${ORDERS_SERVICE_URL}/orders/${existingId}/status`, body, {
               headers: { 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'X-User-Role': 'admin' },
             });
+            if (Object.keys(metadataPatch).length > 0) {
+              await axios.patch(`${ORDERS_SERVICE_URL}/orders/${existingId}`, metadataPatch, {
+                headers: { 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'X-User-Role': 'admin' },
+              });
+            }
             updated++;
-          } else if (canAddTracking) {
-            await axios.patch(`${ORDERS_SERVICE_URL}/orders/${existingId}`, { tracking_number: trackingNumber }, {
+          } else if (Object.keys(metadataPatch).length > 0) {
+            await axios.patch(`${ORDERS_SERVICE_URL}/orders/${existingId}`, metadataPatch, {
               headers: { 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'X-User-Role': 'admin' },
             });
             updated++;
