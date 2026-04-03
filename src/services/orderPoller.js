@@ -107,12 +107,13 @@ function extractDeliverByDate(orderLines) {
 }
 
 /**
- * Extract ship node ID from order lines.
- * Walmart puts the node ID at fulfillment.shipNode.id.
+ * Extract ship node name from order lines.
+ * Walmart puts the node name at fulfillment.shipNode.shipNodeId
+ * (despite the name, this field contains the human-readable name like "Texas Faheem").
  */
 function extractShipNode(orderLines) {
   for (const line of orderLines) {
-    const nodeId = line.fulfillment?.shipNode?.id;
+    const nodeId = line.fulfillment?.shipNode?.shipNodeId;
     if (nodeId) return String(nodeId);
   }
   return null;
@@ -179,14 +180,6 @@ async function fetchAndImportOrders(token, fromDate) {
     const walmartOrders = resp.data?.list?.elements?.order || [];
     cursor = resp.data?.list?.meta?.nextCursor || null;
 
-    // DEBUG: log fulfillment structure of first order once so we can identify correct field names
-    if (walmartOrders.length > 0 && !global.__fulfillmentLogged) {
-      global.__fulfillmentLogged = true;
-      const firstLine = walmartOrders[0]?.orderLines?.orderLine?.[0];
-      console.log('[DEBUG] fulfillment:', JSON.stringify(firstLine?.fulfillment, null, 2));
-      console.log('[DEBUG] orderLineStatuses sample:', JSON.stringify(firstLine?.orderLineStatuses?.orderLineStatus?.[0], null, 2));
-    }
-
     for (const wOrder of walmartOrders) {
       try {
         const externalId = wOrder.purchaseOrderId;
@@ -218,12 +211,12 @@ async function fetchAndImportOrders(token, fromDate) {
           const canPromoteStatus = WALMART_PROMOTABLE.includes(omsStatus) && isMoreAdvanced(currentStatus, omsStatus);
           const canAddTracking = trackingNumber && !currentTracking;
 
-          // Build metadata patch for fields that are null in DB but available from Walmart
+          // Build metadata patch: fill nulls, always overwrite ship_node (may have stale wrong value)
           const metadataPatch = {};
           if (orderDate && !currentOrderDate) metadataPatch.order_date = orderDate;
           if (shipByDate && !currentShipBy) metadataPatch.ship_by_date = shipByDate;
           if (deliverByDate && !currentDeliverBy) metadataPatch.deliver_by_date = deliverByDate;
-          if (shipNode && !currentShipNode) metadataPatch.ship_node = shipNode;
+          if (shipNode && shipNode !== currentShipNode) metadataPatch.ship_node = shipNode;
           if (orderTotal && !currentOrderTotal) metadataPatch.order_total = orderTotal;
           if (canAddTracking) metadataPatch.tracking_number = trackingNumber;
 
