@@ -9,13 +9,12 @@ const ORDERS_SERVICE_URL = process.env.ORDERS_SERVICE_URL || 'http://localhost:3
 
 /**
  * Map Walmart's derived order status to OMS internal status.
- * Returns null for statuses that should be skipped entirely (cancelled).
  */
 function mapWalmartStatus(walmartStatus) {
   switch ((walmartStatus || '').toLowerCase()) {
     case 'shipped':    return 'shipped';
     case 'delivered':  return 'delivered';
-    case 'cancelled':  return null;
+    case 'cancelled':  return 'cancelled';
     case 'created':
     case 'acknowledged':
     default:           return 'new';
@@ -133,14 +132,23 @@ function calculateTotalTax(orderLines) {
 }
 
 /**
- * OMS statuses that Walmart can legitimately push us toward.
- * We never let Walmart touch label_generated, packed, etc.
+ * OMS statuses that Walmart can push us toward via linear progression.
+ * We never let Walmart touch label_generated, packed, etc. (except cancellation).
  */
 const WALMART_PROMOTABLE = ['shipped', 'delivered'];
 
 function isMoreAdvanced(currentStatus, targetStatus) {
   const ORDER = ['new', 'label_generated', 'inventory_ordered', 'packed', 'ready', 'shipped', 'delivered'];
   return ORDER.indexOf(targetStatus) > ORDER.indexOf(currentStatus);
+}
+
+/**
+ * Cancellation overrides any non-cancelled OMS status.
+ * Even if a label was generated or order was packed, a Walmart cancellation
+ * means the order will not be fulfilled — OMS must reflect that immediately.
+ */
+function shouldCancel(omsStatus, currentStatus) {
+  return omsStatus === 'cancelled' && currentStatus !== 'cancelled';
 }
 
 /**
@@ -175,8 +183,6 @@ async function fetchAndImportOrders(token, fromDate) {
         const orderLines = normalizeArray(wOrder.orderLines?.orderLine);
         const derivedStatus = deriveOrderStatus(orderLines);
         const omsStatus = mapWalmartStatus(derivedStatus);
-
-        if (omsStatus === null) { skipped++; continue; }
 
         const shippingAddr = wOrder.shippingInfo?.postalAddress || {};
         const trackingNumber = extractTrackingNumber(orderLines);
@@ -228,6 +234,7 @@ async function fetchAndImportOrders(token, fromDate) {
             shipping_method: currentShippingMethod,
           } = existingOrder;
 
+          const canCancel = shouldCancel(omsStatus, currentStatus);
           const canPromoteStatus = WALMART_PROMOTABLE.includes(omsStatus) && isMoreAdvanced(currentStatus, omsStatus);
           const canAddTracking = trackingNumber && !currentTracking;
 
@@ -247,7 +254,21 @@ async function fetchAndImportOrders(token, fromDate) {
           if (addressType && !currentAddressType) metadataPatch.address_type = addressType;
           if (shippingMethod && !currentShippingMethod) metadataPatch.shipping_method = shippingMethod;
 
-          if (canPromoteStatus) {
+          if (canCancel) {
+            // Cancellation overrides any current OMS status — always apply it.
+            // Include a note so the status log shows the previous state for audit.
+            const cancelNote = `Cancelled on Walmart (was: ${currentStatus})${trackingNumber ? ` — tracking ${trackingNumber} may still be in transit` : ''}`;
+            await axios.patch(`${ORDERS_SERVICE_URL}/orders/${existingId}/status`,
+              { status: 'cancelled', note: cancelNote },
+              { headers: { 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'X-User-Role': 'admin' } }
+            );
+            if (Object.keys(metadataPatch).length > 0) {
+              await axios.patch(`${ORDERS_SERVICE_URL}/orders/${existingId}`, metadataPatch, {
+                headers: { 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'X-User-Role': 'admin' },
+              });
+            }
+            updated++;
+          } else if (canPromoteStatus) {
             const body = { status: omsStatus, note: `Auto-updated from Walmart (${walmartStatus})` };
             await axios.patch(`${ORDERS_SERVICE_URL}/orders/${existingId}/status`, body, {
               headers: { 'X-User-Id': '00000000-0000-0000-0000-000000000000', 'X-User-Role': 'admin' },
