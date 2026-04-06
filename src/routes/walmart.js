@@ -2,6 +2,7 @@ const express = require('express');
 const pool = require('../db');
 const { encrypt } = require('../utils/crypto');
 const { pollOrders, backfillOrders } = require('../services/orderPoller');
+const { shipOrder } = require('../services/walmartShipping');
 const { getCredentials } = require('../services/walmartAuth');
 const { restartScheduler } = require('../services/scheduler');
 const requireUser = require('../middleware/requireUser');
@@ -123,6 +124,35 @@ router.get('/sync/log', requireUser, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } });
+  }
+});
+
+// POST /walmart/ship - Push tracking to Walmart Marketplace for an order
+// Body: { order_id, tracking_number, carrier, ship_datetime? }
+router.post('/ship', requireUser, async (req, res) => {
+  const { order_id, tracking_number, carrier, ship_datetime } = req.body;
+
+  if (!order_id || !tracking_number || !carrier) {
+    return res.status(400).json({
+      error: { code: 'VALIDATION_ERROR', message: 'order_id, tracking_number, and carrier are required' },
+    });
+  }
+
+  const VALID_CARRIERS = ['UPS', 'USPS', 'FedEx', 'DHL', 'Other'];
+  if (!VALID_CARRIERS.includes(carrier)) {
+    return res.status(400).json({
+      error: { code: 'VALIDATION_ERROR', message: `carrier must be one of: ${VALID_CARRIERS.join(', ')}` },
+    });
+  }
+
+  try {
+    const result = await shipOrder(order_id, tracking_number, carrier, ship_datetime || null);
+    res.json(result);
+  } catch (err) {
+    console.error('Ship order error:', err.response?.data || err.message);
+    // Surface Walmart API error message when available
+    const detail = err.response?.data?.errors?.[0]?.description || err.message;
+    res.status(500).json({ error: { code: 'SHIP_ERROR', message: detail } });
   }
 });
 
