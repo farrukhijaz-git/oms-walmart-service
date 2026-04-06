@@ -131,12 +131,6 @@ function calculateTotalTax(orderLines) {
   return tax > 0 ? tax : null;
 }
 
-/**
- * OMS statuses that Walmart can push us toward via linear progression.
- * We never let Walmart touch label_generated, packed, etc. (except cancellation).
- */
-const WALMART_PROMOTABLE = ['shipped', 'delivered'];
-
 function isMoreAdvanced(currentStatus, targetStatus) {
   const ORDER = ['new', 'label_generated', 'inventory_ordered', 'packed', 'ready', 'shipped', 'delivered'];
   return ORDER.indexOf(targetStatus) > ORDER.indexOf(currentStatus);
@@ -153,15 +147,17 @@ function shouldCancel(omsStatus, currentStatus) {
 
 /**
  * Core fetch+import loop. Handles Walmart API pagination via nextCursor.
- * fromDate: ISO string for createdStartDate. Defaults to 24h ago.
+ * @param {string} token - Walmart access token
+ * @param {string} fromDate - ISO string for the date filter
+ * @param {'createdStartDate'|'lastModifiedStartDate'} dateField - which Walmart date param to use
  */
-async function fetchAndImportOrders(token, fromDate) {
+async function fetchAndImportOrders(token, fromDate, dateField = 'createdStartDate') {
   let cursor = null;
   let pulled = 0, updated = 0, skipped = 0;
   const errors = [];
 
   do {
-    const params = { createdStartDate: fromDate, limit: 200 };
+    const params = { [dateField]: fromDate, limit: 200 };
     if (cursor) params.nextCursor = cursor;
 
     const resp = await axios.get(WALMART_ORDERS_URL, {
@@ -235,7 +231,7 @@ async function fetchAndImportOrders(token, fromDate) {
           } = existingOrder;
 
           const canCancel = shouldCancel(omsStatus, currentStatus);
-          const canPromoteStatus = WALMART_PROMOTABLE.includes(omsStatus) && isMoreAdvanced(currentStatus, omsStatus);
+          const canPromoteStatus = isMoreAdvanced(currentStatus, omsStatus);
           const canAddTracking = trackingNumber && !currentTracking;
 
           const metadataPatch = {};
@@ -370,10 +366,17 @@ async function pollOrders() {
   const creds = await getCredentials();
   const token = await getAccessToken();
 
-  // Always look back 24 hours — Walmart releases orders in nightly batches.
-  // external_id duplicate check makes re-polling safe.
+  // Look back 24 hours on both axes:
+  // - createdStartDate: catches new orders (Walmart releases in nightly batches)
+  // - lastModifiedStartDate: catches status updates (shipped/delivered/cancelled) on older orders
   const fromDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const { pulled, updated, skipped, errors } = await fetchAndImportOrders(token, fromDate);
+  const byCreated  = await fetchAndImportOrders(token, fromDate, 'createdStartDate');
+  const byModified = await fetchAndImportOrders(token, fromDate, 'lastModifiedStartDate');
+
+  const pulled  = byCreated.pulled  + byModified.pulled;
+  const updated = byCreated.updated + byModified.updated;
+  const skipped = byCreated.skipped + byModified.skipped;
+  const errors  = [...byCreated.errors, ...byModified.errors];
 
   await pool.query(
     'UPDATE walmart.credentials SET last_polled_at = now(), updated_at = now() WHERE id = $1',
