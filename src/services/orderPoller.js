@@ -384,12 +384,14 @@ async function pollOrders() {
   const creds = await getCredentials();
   const token = await getAccessToken();
 
-  // Look back 24 hours on both axes:
-  // - createdStartDate: catches new orders (Walmart releases in nightly batches)
-  // - lastModifiedStartDate: catches status updates (shipped/delivered/cancelled) on older orders
-  const fromDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const byCreated  = await fetchAndImportOrders(token, fromDate, 'createdStartDate');
-  const byModified = await fetchAndImportOrders(token, fromDate, 'lastModifiedStartDate');
+  // createdStartDate: 24h lookback — catches new orders (Walmart releases in nightly batches)
+  // lastModifiedStartDate: 7-day lookback — catches status updates (shipped/delivered/cancelled)
+  // on orders that may have been missed due to API hiccups, container restarts, or updates
+  // that happened just outside a previous 24h window.
+  const createdFrom  = new Date(Date.now() -      24 * 60 * 60 * 1000).toISOString();
+  const modifiedFrom = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const byCreated  = await fetchAndImportOrders(token, createdFrom,  'createdStartDate');
+  const byModified = await fetchAndImportOrders(token, modifiedFrom, 'lastModifiedStartDate');
 
   const pulled  = byCreated.pulled  + byModified.pulled;
   const updated = byCreated.updated + byModified.updated;
