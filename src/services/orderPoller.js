@@ -131,6 +131,16 @@ function calculateTotalTax(orderLines) {
   return tax > 0 ? tax : null;
 }
 
+/**
+ * Returns true for network-level errors that mean the orders service is
+ * unreachable (wrong URL, container down, misconfigured env var, etc.).
+ * These are fatal for the whole poll — no point processing further orders.
+ */
+function isConnectivityError(err) {
+  const CONNECTIVITY_CODES = ['ECONNREFUSED', 'ENOTFOUND', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH'];
+  return CONNECTIVITY_CODES.includes(err.code);
+}
+
 function isMoreAdvanced(currentStatus, targetStatus) {
   const ORDER = ['new', 'label_generated', 'inventory_ordered', 'packed', 'ready', 'shipped', 'delivered'];
   return ORDER.indexOf(targetStatus) > ORDER.indexOf(currentStatus);
@@ -345,6 +355,14 @@ async function fetchAndImportOrders(token, fromDate, dateField = 'createdStartDa
         });
         pulled++;
       } catch (err) {
+        // Connectivity errors mean the orders service is unreachable entirely —
+        // abort the whole poll immediately rather than logging per-order noise.
+        if (isConnectivityError(err)) {
+          throw new Error(
+            `Orders service unreachable at ${ORDERS_SERVICE_URL} (${err.code}) — ` +
+            `check ORDERS_SERVICE_URL env var and container networking`
+          );
+        }
         errors.push(`Order ${wOrder.purchaseOrderId}: ${err.message}`);
       }
     }
