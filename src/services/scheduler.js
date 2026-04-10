@@ -1,6 +1,6 @@
 const cron = require('node-cron');
 const pool = require('../db');
-const { pollOrders } = require('./orderPoller');
+const { pollOrders, reconcileOrders } = require('./orderPoller');
 
 let currentTask = null;
 
@@ -53,6 +53,25 @@ async function startScheduler() {
           `INSERT INTO walmart.sync_log (sync_type, status, orders_pulled, orders_pushed, error_message)
            VALUES ('pull_orders', 'failed', 0, 0, $1)`,
           [err.message]
+        );
+      } catch {}
+    }
+  });
+
+  // Daily reconciliation at 3am: 90-day lastModifiedStartDate lookback to catch
+  // shipped→delivered transitions that fell outside the regular 7-day window.
+  cron.schedule('0 3 * * *', async () => {
+    console.log('Running daily 90-day reconciliation...');
+    try {
+      const result = await reconcileOrders();
+      console.log(`Reconciliation: ${result.pulled} pulled, ${result.updated} updated, ${result.skipped} skipped`);
+    } catch (err) {
+      console.error('Reconciliation error:', err.message);
+      try {
+        await pool.query(
+          `INSERT INTO walmart.sync_log (sync_type, status, orders_pulled, orders_pushed, error_message)
+           VALUES ('pull_orders', 'failed', 0, 0, $1)`,
+          [`Daily reconciliation failed: ${err.message}`]
         );
       } catch {}
     }

@@ -436,4 +436,30 @@ async function backfillOrders(fromDate) {
   return { pulled, updated, skipped, errors };
 }
 
-module.exports = { pollOrders, backfillOrders };
+/**
+ * Daily reconciliation job: look back 90 days using lastModifiedStartDate.
+ * Designed to catch shipped→delivered (or shipped→cancelled) transitions that
+ * fell outside the regular 7-day window — e.g. orders that sat in "Shipped"
+ * for weeks before Walmart finally marked them Delivered.
+ *
+ * Does not update last_polled_at so the regular poll schedule is unaffected.
+ */
+async function reconcileOrders() {
+  const token = await getAccessToken();
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  const { pulled, updated, skipped, errors } = await fetchAndImportOrders(token, ninetyDaysAgo, 'lastModifiedStartDate');
+
+  await pool.query(
+    `INSERT INTO walmart.sync_log (sync_type, status, orders_pulled, orders_pushed, error_message)
+     VALUES ('pull_orders', $1, $2, 0, $3)`,
+    [
+      errors.length === 0 ? 'success' : pulled + updated > 0 ? 'partial' : 'failed',
+      pulled + updated,
+      buildLogMessage(pulled, updated, skipped, errors) || '90-day reconciliation',
+    ]
+  );
+
+  return { pulled, updated, skipped, errors };
+}
+
+module.exports = { pollOrders, backfillOrders, reconcileOrders };
