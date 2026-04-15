@@ -1,7 +1,7 @@
 const express = require('express');
 const pool = require('../db');
 const { encrypt } = require('../utils/crypto');
-const { pollOrders, backfillOrders } = require('../services/orderPoller');
+const { pollOrders, backfillOrders, reconcileOrders } = require('../services/orderPoller');
 const { shipOrder } = require('../services/walmartShipping');
 const { getCredentials } = require('../services/walmartAuth');
 const { restartScheduler } = require('../services/scheduler');
@@ -65,6 +65,17 @@ router.post('/sync/backfill', requireUser, requireAdmin, async (req, res) => {
     console.log(`Backfill from ${from_date}: pulled=${result.pulled}, updated=${result.updated}, skipped=${result.skipped}, errors=${result.errors.length}`);
   }).catch(err => {
     console.error('Backfill error:', err.message);
+  });
+});
+
+// POST /walmart/sync/reconcile - manually trigger 90-day reconciliation (Admin only)
+// Responds immediately; reconciliation runs in background.
+router.post('/sync/reconcile', requireUser, requireAdmin, async (req, res) => {
+  res.json({ ok: true, message: '90-day reconciliation started. Check sync log for results.' });
+  reconcileOrders().then(result => {
+    console.log(`Manual reconciliation: pulled=${result.pulled}, updated=${result.updated}, skipped=${result.skipped}, errors=${result.errors.length}`);
+  }).catch(err => {
+    console.error('Manual reconciliation error:', err.message);
   });
 });
 

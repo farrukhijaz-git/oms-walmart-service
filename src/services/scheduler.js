@@ -3,6 +3,7 @@ const pool = require('../db');
 const { pollOrders, reconcileOrders } = require('./orderPoller');
 
 let currentTask = null;
+let reconcileTask = null;
 
 async function getInterval() {
   try {
@@ -28,6 +29,7 @@ async function startScheduler() {
   console.log(`Starting Walmart order poller: every ${intervalSeconds}s (${cronExpr})`);
 
   if (currentTask) currentTask.stop();
+  if (reconcileTask) reconcileTask.stop();
 
   // Run once immediately on startup so we don't wait a full interval after a
   // Render spin-up or service restart before catching up on missed orders.
@@ -58,9 +60,10 @@ async function startScheduler() {
     }
   });
 
-  // Daily reconciliation at 3am: 90-day lastModifiedStartDate lookback to catch
-  // shipped→delivered transitions that fell outside the regular 7-day window.
-  cron.schedule('0 3 * * *', async () => {
+  // Daily reconciliation at 3am: 90-day lookback (both createdStartDate and
+  // lastModifiedStartDate) to catch any orders missed by the regular poller and
+  // any shipped→delivered/cancelled transitions outside the 7-day window.
+  reconcileTask = cron.schedule('0 3 * * *', async () => {
     console.log('Running daily 90-day reconciliation...');
     try {
       const result = await reconcileOrders();
@@ -71,7 +74,7 @@ async function startScheduler() {
         await pool.query(
           `INSERT INTO walmart.sync_log (sync_type, status, orders_pulled, orders_pushed, error_message)
            VALUES ('pull_orders', 'failed', 0, 0, $1)`,
-          [`Daily reconciliation failed: ${err.message}`]
+          [`90-day reconciliation failed: ${err.message}`]
         );
       } catch {}
     }
