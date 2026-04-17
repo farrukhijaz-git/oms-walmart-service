@@ -463,7 +463,7 @@ async function reconcileOrders() {
 
   await pool.query(
     `INSERT INTO walmart.sync_log (sync_type, status, orders_pulled, orders_pushed, error_message)
-     VALUES ('pull_orders', $1, $2, 0, $3)`,
+     VALUES ('reconcile', $1, $2, 0, $3)`,
     [
       errors.length === 0 ? 'success' : pulled + updated > 0 ? 'partial' : 'failed',
       pulled + updated,

@@ -129,7 +129,7 @@ router.get('/sync/log', requireUser, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT id, sync_type, status, orders_pulled, orders_pushed, error_message, synced_at
-       FROM walmart.sync_log ORDER BY synced_at DESC LIMIT 20`
+       FROM walmart.sync_log ORDER BY synced_at DESC LIMIT 100`
     );
     res.json({ log: rows });
   } catch (err) {

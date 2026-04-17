@@ -73,7 +73,7 @@ async function startScheduler() {
       try {
         await pool.query(
           `INSERT INTO walmart.sync_log (sync_type, status, orders_pulled, orders_pushed, error_message)
-           VALUES ('pull_orders', 'failed', 0, 0, $1)`,
+           VALUES ('reconcile', 'failed', 0, 0, $1)`,
           [`90-day reconciliation failed: ${err.message}`]
         );
       } catch {}
